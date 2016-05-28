@@ -1,11 +1,12 @@
 Source: lbnamed
 Section: net
 Priority: optional
-Build-Depends: debhelper (>= 7.0.50~)
+Build-Depends: debhelper (>= 9)
 Build-Depends-Indep: perl
-Maintainer: Russ Allbery <rra@debian.org>
-Bugs: mailto:rra@dewbian.org
-Standards-Version: 3.8.1
+# original maintainer: Russ Allbery <rra@debian.org>
+Maintainer: František Dvořák <valtri@civ.zcu.cz>
+Bugs: mailto:valtri@civ.zcu.cz
+Standards-Version: 3.9.8
 Homepage: http://www.stanford.edu/~riepel/lbnamed/
 
 Package: lbnamed

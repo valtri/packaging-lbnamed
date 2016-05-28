@@ -1,4 +1,4 @@
-lbnamed.config  etc/lbnamed/lbnamed.config
-lbnamed         etc/lbnamed/lbnamed
+lbnamed.config  etc
+lbnamed         etc
 poller          usr/sbin
 LBCD.pm         usr/share/perl5

@@ -1,6 +1,5 @@
-Format-Specification:
- http://wiki.debian.org/Proposals/CopyrightFormat?action=recall&rev=442
-Upstream-Maintainer: Rob Riepel <riepel@stanford.edu>
+Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Contact: Rob Riepel <riepel@stanford.edu>
 Upstream-Source: http://www.stanford.edu/~riepel/lbnamed/
 
 Files: *
