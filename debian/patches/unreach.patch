@@ -1,0 +1,19 @@
+Fix the critical bug due to unreachable hosts.
+
+Index: packaging-lbnamed/poller
+===================================================================
+--- packaging-lbnamed.orig/poller
++++ packaging-lbnamed/poller
+@@ -103,6 +103,12 @@ sub poll {
+     my %hosts_to_poll = %hosts;
+     my @hosts         = values %hosts_to_poll;
+ 
++    # ZCU: fix the critical bug in the original code:
++    # no unreach hosts, just increase the cost
++    foreach my $host (sort values %hosts_to_poll) {
++      $response{$host} = "0 0 0 99999 99999 99999 0 0 0";
++    }
++
+     while ( @hosts and @hosts != $todo ) {
+         $todo = @hosts;
+         foreach (@hosts) {

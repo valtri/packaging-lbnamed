@@ -1,8 +1,9 @@
-lbnamed (2.3.2-1+fd1) unstable; urgency=low
+lbnamed (2.3.2-1+fd1) unstable; urgency=medium
 
   * Moar packaging (startup script, ...).
+  * Patch to fix critical problem with uneachable hosts
 
- -- František Dvořák <valtri@civ.zcu.cz>  Sat, 28 May 2016 09:53:41 +0200
+ -- František Dvořák <valtri@civ.zcu.cz>  Sun, 29 May 2016 00:40:52 +0200
 
 lbnamed (2.3.2-1) unstable; urgency=low
 
