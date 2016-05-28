@@ -1,0 +1,17 @@
+Source: lbnamed
+Section: net
+Priority: optional
+Build-Depends: debhelper (>= 7.0.50~)
+Build-Depends-Indep: perl
+Maintainer: Russ Allbery <rra@debian.org>
+Bugs: mailto:rra@dewbian.org
+Standards-Version: 3.8.1
+Homepage: http://www.stanford.edu/~riepel/lbnamed/
+
+Package: lbnamed
+Architecture: all
+Depends: ${perl:Depends}, ${misc:Depends}, libstanford-dnsserver-perl
+Description: load-balancing DNS name server
+ lbnamed queries remote hosts running an lbcd responder and uses the
+ returned weight information plus a configurable weighing algorithm to
+ return potentially different DNS results on each query.

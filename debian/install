@@ -1,0 +1,4 @@
+lbnamed.config  etc
+lbnamed         usr/sbin
+poller          usr/sbin
+LBCD.pm         usr/share/perl5

@@ -1,0 +1,16 @@
+#!/usr/bin/make -f
+
+VERSION := $(shell dpkg-parsechangelog | grep ^Version: | cut -d' ' -f2 \
+		| cut -d- -f1)
+
+%:
+	dh $@
+
+override_dh_auto_install:
+	install -d debian/lbnamed/usr/share/man/man8
+	pod2man --section=8 --release=$(VERSION) \
+	    --center='Maintenance Commands' lbnamed \
+	    > debian/lbnamed/usr/share/man/man8/lbnamed.8
+	pod2man --section=8 --release=$(VERSION) \
+	    --center='Maintenance Commands' poller \
+	    > debian/lbnamed/usr/share/man/man8/poller.8

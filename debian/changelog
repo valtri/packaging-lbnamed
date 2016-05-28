@@ -1,0 +1,6 @@
+lbnamed (2.3.2-1) unstable; urgency=low
+
+  * Initial packaging, based loosely on the stanford-lbnamed packaging but
+    without the daemontools configuration.
+
+ -- Russ Allbery <rra@debian.org>  Mon, 23 Mar 2009 15:29:20 -0700
