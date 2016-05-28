@@ -36,7 +36,8 @@ do_start()
 
 do_stop()
 {
-  start-stop-daemon --stop --quiet --retry=QUIT/10/KILL/5 --pidfile $PIDFILE --exec /usr/bin/perl
+  # using SIGKILL to avoid coredumps (there is probably some problem during stop)
+  start-stop-daemon --stop --quiet --signal=KILL --pidfile $PIDFILE --exec /usr/bin/perl
 }
 
 case "$1" in
