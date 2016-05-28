@@ -1,0 +1,280 @@
+#!/usr/bin/perl
+
+use LBCD;
+use strict;
+use IO::Socket;
+use IO::Select;
+use Getopt::Long;
+
+our ( %hosts, %ipaddrs, %server_factor, %aliases, $ttls, %response,
+      @unreachable, $need_maint, $debug, $config_file, $socket,
+      $select, $packet );
+
+my ($help, $signal, $poller_path);
+
+my $sleep_interval  = 120;    # in seconds
+my $reload_interval =  10;    # reload poller config every N sleep intervals
+
+GetOptions("d|debug"      => \$debug,
+           "h|help"       => \$help,
+           "s|signal"     => \$signal,
+           "i|interval=i" => \$sleep_interval,
+           "p|path=s"     => \$poller_path,
+           "r|reload=i"   => \$reload_interval)  or  usage();
+
+$config_file = shift;
+
+usage() if $help or not $config_file;
+my $ppid = getppid if $signal;
+$poller_path = $config_file . '.' unless $poller_path;
+
+load_config($config_file);
+init_socket();
+init_signals();
+
+while (1) {
+    my $poll_start = time;
+    my $do_reload_every = 0;
+
+    poll();
+
+    dump_status  ( "${poller_path}status"  );
+    dump_unreach ( "${poller_path}unreach" );
+    dump_lb      ( "${poller_path}lb"      );
+
+    if ($signal && $ppid > 1) {
+        exit(0) if kill('HUP',$ppid) != 1;
+    }
+
+    # set flags to cause a config reload every reload interval
+    catch_hup() unless ++$do_reload_every%$reload_interval;
+
+    do_maint() if ($need_maint);
+
+    my $poll_sleep = $sleep_interval - (time - $poll_start);
+    sleep($poll_sleep) if ($poll_sleep > 0);
+}
+
+sub load_config {
+    local *CONFIG;
+    my $file = shift;
+
+    %hosts         = ();
+    %ipaddrs       = ();
+    %server_factor = ();
+    %aliases       = ();
+    $ttls          = "";
+
+    open(CONFIG,$file) or die "can't open $file: $!";
+    while(<CONFIG>) {
+        s/^\s+//;
+        s/\s+$//;
+        next if /^#/ || /^$/;
+        my ($host, $server_factor, $aliases) = split(/\s+/,$_,3);
+        if ($host !~ /.*\..*/ ) { $ttls .= $_ . "\n"; next; }  # ttl section
+        $server_factor{$host} = $server_factor;
+        $aliases =~ s/\s*\(\s*/(/g;
+        $aliases =~ s/\s*\)\s*/) /g;
+        $aliases =~ s/\s+$//;
+        $aliases{$host} = $aliases;
+        if ( my $ip = inet_aton($host) ) {
+            $ipaddrs{$host} = my $ipstr = inet_ntoa($ip);
+            $hosts{$ipstr}  = $host;
+        } else {
+            print STDERR "Can't get IP address for: $host\n";
+        }
+    }
+}
+
+sub init_socket {
+
+    $socket = new IO::Socket::INET Proto => 'udp' or die "socket: $@";
+    $select = new IO::Select;        $select->add($socket);
+    $packet = pack(LBCD::P_HEADER,   LBCD::PROTO_VERSION,  0,
+                   LBCD::OP_LB_INFO, LBCD::STATUS_REQUEST);
+}
+
+sub poll {
+
+    %response    = ();
+    @unreachable = ();
+
+    my ($todo, $done) = (0,0);
+    my %hosts_to_poll = %hosts;
+    my @hosts         = values %hosts_to_poll;
+
+    while ( @hosts and @hosts != $todo ) {
+        $todo = @hosts;
+        foreach (@hosts) {
+            my $dest = sockaddr_in(LBCD::PROTO_PORTNUM,inet_aton($ipaddrs{$_}));
+            $socket->send($packet,0,$dest) or die "can't send: $!";
+        }
+        while ($select->can_read(2.000)) {
+            my $buff='';
+            $socket->recv($buff,8192,0) or die "Can't receive: $!";
+            my ($ver, $id, $op, $status, $btime, $ctime, $utime, $l1,
+                $l5, $l15, $tot_user, $uniq_user, $on_console, $resv)
+              = unpack(LBCD::P_LB_RESPONSE,$buff);
+            my $ip = $socket->peerhost;
+            $response{$hosts{$ip}} = "$btime $ctime $utime $l1 $l5 $l15 " .
+                                     "$tot_user $uniq_user $on_console";
+            delete $hosts_to_poll{$ip};    $done++;
+        }
+        printf(" %3d ($todo)\n",$done) if $debug;
+        @hosts = values %hosts_to_poll;
+        $done = 0;
+    }
+    @unreachable = @hosts;
+}
+
+sub dump_lb {
+    local(*FILE);
+    my $file = shift;
+    open(FILE,">$file.new");
+
+    foreach my $host ( keys %response) {
+        $_ = $response{$host};
+        my ($btime,$ctime,$utime,$l1,$l5,$l15,$tot_user,$uniq_user,$on_console,$resv)=split;
+        my ($WEIGHT_PER_USER, $WEIGHT_PER_LOAD_UNIT, $weight, $ip);
+
+        $WEIGHT_PER_USER = 10;
+        $WEIGHT_PER_LOAD_UNIT = 3;
+
+        $weight = $WEIGHT_PER_USER * (0.2 * $tot_user + 0.8 * $uniq_user)
+                                   * (10 - $server_factor{$host})
+                + $WEIGHT_PER_LOAD_UNIT * $l1 * $server_factor{$host};
+
+        $ip     = $ipaddrs{$host};
+        print FILE "$weight $server_factor{$host} $host $ip $aliases{$host}\n";
+    }
+    print FILE $ttls;
+    close(FILE);
+    unlink($file);
+    rename("$file.new","$file");
+}
+
+sub dump_status {
+    local(*FILE);
+    my $file = shift;
+    open(FILE,">$file.new");
+
+    foreach my $host (sort keys %response) {
+        $_ = $response{$host};
+        my ($btime,$ctime,$utime,$l1,$l5,$l15,$tot_user,$uniq_user,$on_console,$resv)=split;
+        print FILE "$host $btime $ctime $utime $l1 $l5 $l15 $tot_user $uniq_user $on_console\n";
+    }
+    close(FILE);
+    unlink($file);
+    rename("$file.new","$file");
+}
+
+sub dump_unreach {
+    local(*FILE);
+    my $file = shift;
+    open(FILE,">$file.new");
+
+    foreach my $host (sort @unreachable) { print FILE "$host\n" }
+    close(FILE);
+    unlink($file);
+    rename("$file.new","$file");
+}
+
+sub init_signals { $SIG{'HUP'} = 'catch_hup'; }
+
+sub catch_hup    { $need_maint = 1; }
+
+sub do_maint     { load_config($config_file);  $need_maint = 0; }
+
+sub usage {
+
+    $0 =~ s|.*/||;
+
+    die <<EOF;
+
+  Usage:  $0 [-i interval] [-r count] [-p prefix] [-s] config_file
+
+    config_file   configuration file
+
+    -i interval   time between polls in seconds (def: $sleep_interval)
+    -r count      reload config_file ever 'count' intervals (def: $reload_interval)
+    -p prefix     write results under 'prefix' (def: config_file.)
+    -s            send a HUP to the parent process when the poller
+                      data is ready
+
+EOF
+
+}
+
+=head1 NAME
+
+poller - System poller for load-balanced DNS server
+
+=head1 SYNOPSIS
+
+B<poller> [B<-s>] [B<-i> I<interval>] [B<-r> I<count>] [B<-p> I<prefix>]
+I<configuration_file>
+
+=head1 DESCRIPTION
+
+B<poller> is the remote system poller component of the B<lbnamed>
+load-balanced DNS server.  It contacts all of the systems listed in the
+F<configuration_file> via the lbcd protocol, determines the reported system
+load and number of users, and writes out a data file for B<lbnamed> to use.
+Normally, B<poller> is never run directly, only by B<lbnamed>.
+
+Any system that is participating in a load-balanced pool must run an lbcd
+responder, normally the program B<lbcd>, to answer the UDP queries from
+B<poller>.
+
+B<poller> writes out three files: F<lb> (read by B<lbnamed>), F<status>, and
+F<unreach>.  Normally the names of these files are formed by appending a
+period and the name to the end of I<config>, but see the B<-p> option.
+F<lb> contains the parsed configuration file information for B<lbnamed>,
+F<status> contains more human-readable host status information, and
+F<unreach> lists all the hosts that are not reachable or not responding to
+queries.
+
+For the syntax of the configuration file, see the lbnamed(8) man page.
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-i> I<interval>
+
+Time between polls of all participating systems in seconds.  The default
+interval is two minutes (120 seconds).
+
+=item B<-p> I<prefix>
+
+Normally, the output files are named by appending a period and the name of
+the file to the path of the configuration file.  If this option is given,
+the name of the file is appended to I<prefix> instead.  If I<prefix> is
+supposed to be a directory into which the files should be written, don't
+forget to add the trailing slash.
+
+=item B<-r> I<count>
+
+Re-read the configuration file after every I<count> polls of the systems.
+The default value is 10.
+
+=item B<-s>
+
+When new status files have been written out, signal the parent process of
+B<poller> with a HUP signal.
+
+=back
+
+=head1 SEE ALSO
+
+lbcd(8), lbnamed(8)
+
+See L<http://www.stanford.edu/~riepel/lbnamed/> for more information on the
+B<lbnamed> system, including the original LISA paper.
+
+=head1 AUTHORS
+
+Rob Riepel, based on earlier work by Roland Schemers.  Documentation written
+by Russ Allbery.
+
+=cut

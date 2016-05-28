@@ -1,0 +1,633 @@
+#!/usr/bin/perl
+
+############################################################
+#
+#  lbnamed - load balancing name server
+#
+############################################################
+
+use Getopt::Std;
+use Sys::Hostname;
+use Stanford::DNS;
+use Stanford::DNSserver;
+
+
+############################################################
+#
+#  Configuration / Initialization
+#
+
+$WEIGHT_PER_USER      = 10; # should be consistent with poller
+$WEIGHT_PER_LOAD_UNIT = 3;  # should be consistent with poller
+$default_ttl          = 0;
+$poller               = "/usr/sbin/poller";
+$poller_sleep         = 120;
+$poller_config        = "/etc/lbnamed.config";
+$poller_results       = $poller_config . '.';
+$poller_pidfile       = "/var/run/poller.pid";
+$pidfile              = "/var/run/lbnamed.pid";
+$hostmaster           = "action.stanford.edu";
+@servers              = qw(lbdns1.stanford.edu lbdns2.stanford.edu);
+$soa                  = rr_SOA(hostname(), $hostmaster, time(), 3600, 1800, 86400, 0);
+
+
+############################################################
+#
+#  Command-line arguement processing
+#
+
+($myname = $0) =~ s|.*/||;  $hostname = hostname();
+
+getopts("dh:l:np:s") or die <<EOF;
+
+  Usage:  $myname [options]
+
+      -d           debug
+      -h hostname  listen on the IP with name "hostname"
+      -l logfile   log file
+      -n           don't become a daemon
+      -p prefix    expect poller results under "prefix"
+      -s           log statistics
+
+  If -h is not specified, the current hostname, $hostname,
+  will be used.  If -n is specified without -l, log information is
+  written to STDOUT.  If -p is not specified, poller results will
+  be expected relative to the path of the configuration file.
+
+EOF
+#'# cperl-mode
+
+$debug          = $opt_d;
+$daemon         = $opt_n ? "no" : "yes";
+$hostname       = $opt_h if $opt_h;
+$log_file       = $opt_l;
+$log_stats      = $opt_s;
+$poller_results = $opt_p if $opt_p;
+
+open_log($log_file) if ($log_file or $opt_n);
+
+
+############################################################
+#
+#  Set up name server
+#
+
+$ns = new Stanford::DNSserver (
+                               listen_on =>   [$hostname],
+                               daemon    =>       $daemon,
+                               pidfile   =>      $pidfile,
+                               debug     =>        $debug,
+                               logfunc   =>   \&write_log,
+                               loopfunc  =>   \&do_reload,
+                               exitfunc  =>  \&clean_exit,
+                               dontwait  =>             1
+                              );
+
+
+############################################################
+#
+#  Domains
+#
+#    best.stanford.edu    --  CNAME load-balanced domain
+#    best-a.stanford.edu  --  A load-balanced domain
+#
+
+$ns->add_static("best.stanford.edu",  T_SOA, $soa);
+$ns->add_static("best-a.stanford.edu",T_SOA, $soa);
+
+$ns->add_dynamic("best.stanford.edu"   => \&handle_lb_request);
+$ns->add_dynamic("best-a.stanford.edu" => \&handle_lb_a_request);
+
+$ns->add_static("localhost.best.stanford.edu",  T_A,rr_A(0x7f000001));
+$ns->add_static("localhost.best-a.stanford.edu",T_A,rr_A(0x7f000001));
+
+foreach (@servers) {
+    $ns->add_static("best.stanford.edu",   T_NS, rr_NS($_));
+    $ns->add_static("best-a.stanford.edu", T_NS, rr_NS($_));
+}
+
+
+############################################################
+#
+#  Initialize signals and start the name server
+#
+
+init_signals();
+$ns->answer_queries();
+
+
+############################################################
+#
+#  Dynamic domain handlers
+#
+
+sub by_weight { $weight{$a} / $$a{$qname} <=> $weight{$b} / $$b{$qname}; }
+sub min       { my @values = sort {$a <=> $b} @_;  return shift @values; }
+
+sub handle_lb_request {
+    my($domain,$residual,$qtype,$qclass,$dm) = @_;
+
+    my($the_host,$the_ip,$answer,$group);
+    local($qname);
+
+    $qname = $residual;
+
+    unless ($group = $lb_groups{$qname}) {
+        $dm->{'rcode'} = NXDOMAIN;
+        return 1;
+    }
+
+    if ($qtype == T_A || $qtype == T_MX || $qtype == T_ANY || $qtype == T_CNAME) {
+
+        @$group = sort by_weight @$group;
+        $the_host = $rnd{$qname} ? @$group[int(rand(min($rnd{$qname},$#$group)))] : @$group[0];
+        $weight{$the_host} += $WEIGHT_PER_USER * (10 - $server_factor{$the_host})
+                            + $WEIGHT_PER_LOAD_UNIT * $server_factor{$the_host};
+
+        if ($log_stats) {
+            $hits{$the_host}++;
+            $group_hits{$qname}++;
+            $total_group_hits{$qname}++;
+        }
+
+        $answer = dns_answer(QPTR, T_CNAME, C_IN, $ttl{$qname}, rr_CNAME($the_host));
+
+        $dm->{'answer'}  .= $answer;
+        $dm->{'ancount'} += 1;
+
+    } elsif ($qtype == T_TXT) {
+
+        $answer = "";
+        $dm->{'ancount'} = 0;
+
+        for $the_host (sort by_weight @$group) {
+            $answer .=
+              dns_answer(QPTR, T_TXT, C_IN, 0,
+                         rr_TXT(sprintf("%7d/%-5.3f  %s",$weight{$the_host},
+                                                         $$the_host{$qname},
+                                                         $the_host)));
+            $dm->{'ancount'} += 1;
+        }
+        $dm->{'answer'} = $answer;
+
+    } else {
+        $dm->{'rcode'} = NOERROR;
+    }
+    return 1;
+}
+
+sub handle_lb_a_request {
+    my($domain,$residual,$qtype,$qclass,$dm) = @_;
+
+    my($the_host,$the_ip,$answer,$group);
+    local($qname);
+
+    $qname = $residual;
+
+    unless ($group = $lb_groups{$qname}) {
+        $dm->{'rcode'} = NXDOMAIN;
+        return 1;
+    }
+
+    if ($qtype == T_A || $qtype == T_ANY) {
+
+        @$group = sort by_weight @$group;
+        $the_host = $rnd{$qname} ? @$group[int(rand(min($rnd{$qname},$#$group)))] : @$group[0];
+        $weight{$the_host} += $WEIGHT_PER_USER * (10 - $server_factor{$the_host})
+                            + $WEIGHT_PER_LOAD_UNIT * $server_factor{$the_host};
+
+        if ($log_stats) {
+            $hits{$the_host}++;
+            $group_hits{$qname}++;
+            $total_group_hits{$qname}++;
+        }
+
+        $the_ip = $ip_host{$the_host};
+
+        $dm->{'answer'}  .= dns_answer(QPTR, T_A, C_IN, $ttl{$qname}, rr_A($the_ip));
+        $dm->{'ancount'} += 1;
+
+    } elsif ($qtype == T_MX) {
+
+        unless (defined $mx{$qname}) {
+            $dm->{'rcode'} = NOERROR;
+            return 1;
+        }
+
+        $dm->{'answer'}  = dns_answer(QPTR, T_MX, C_IN, 3600, rr_MX(10,$mx{$qname}));
+        $dm->{'ancount'} = 1;
+
+    } elsif ($qtype == T_TXT) {
+
+        $answer = "";
+        $dm->{'ancount'} = 0;
+
+        for $the_host (sort by_weight @$group) {
+            $answer .=
+              dns_answer(QPTR, T_TXT, C_IN, 0,
+                         rr_TXT(sprintf("%7d/%-5.3f  %s",$weight{$the_host},
+                                                         $$the_host{$qname},
+                                                         $the_host)));
+            $dm->{'ancount'} += 1;
+        }
+        $dm->{'answer'} = $answer;
+
+    } else {
+        $dm->{'rcode'} = NOERROR;
+    }
+    return 1;
+}
+
+
+############################################################
+#
+#  Poller interaction
+#
+
+sub start_poller {
+    write_log("starting poller with $poller_sleep second interval");
+    if (($poller_id=fork)==0) {
+        exec $poller, '-s', '-i', $poller_sleep, '-p', $poller_results,
+          $poller_config;
+    }
+    write_pid($poller_pidfile,$poller_id);
+    while ( -M "${poller_results}lb" > 0 ) {
+        write_log("waiting for poller results...");
+        sleep 1;
+    }
+    write_log("ready to answer queries.");
+}
+
+sub restart_poller {
+    local($pid) = wait;
+    return if ($pid != $poller_id);
+    write_log("restarting poller");
+    if (($poller_id=fork)==0) {
+        exec $poller, '-s', '-i', $poller_sleep, '-p', $poller_results,
+          $poller_config;
+    }
+    write_pid($poller_pidfile,$poller_id);
+}
+
+sub kill_poller {
+    $::SIG{'CHLD'} = 'IGNORE';
+    if ($poller_id) {
+        write_log("killing poller($poller_id)");
+        kill 'QUIT',$poller_id;
+    }
+}
+
+sub do_reload {
+    write_log("do_reload") if $debug;
+    start_poller unless $poller_id;
+    if ($need_reload) {
+        open_log($log_file) if $log_logging;
+        log_stats() if $log_stats;
+        write_log("reloading config") if $debug;
+        load_config("${poller_results}lb");
+        $need_reload=0;
+    }
+}
+
+sub load_config {
+    local($file) = @_;
+    my($host,$bg,$a,$b,$c,$d,$ipaddr,$weight,$ip,$groups,$message);
+    my($entry,$play);
+
+    $message = "load_config:" if $debug;
+
+    %ttl=();
+    %rnd=();
+    %mx=();
+    %hits=();
+    %group_hits=();
+    %weight=();
+    %server_factor=();
+    %lb_groups=();
+    %ip_host=();
+
+    open(CONFIG,$file) or write_log("Can't open config file: $file: $!");
+
+    while(<CONFIG>) {
+        s/^\s+//;
+        s/\s+$//;
+        next if /^#/ || /^$/;
+        ($weight,$server_factor,$host,$ip,$groups) = split(/\s+/,$_,5);
+        $message .= "\n  loading $_" if $debug;
+        if ($weight !~ /^[0-9]+/ ) {
+            $ttl{$weight} = $server_factor;    # ttl
+            $rnd{$weight} = $host if $host;    # random
+            $mx{$weight}  = $ip if $ip;        # mx
+            write_log("N  for $weight is $host") if ($debug && $host);
+            write_log("MX for $weight is $ip")   if ($debug && $ip);
+            next;
+        }
+        $_ = $ip;
+        ($a,$b,$c,$d) =  /(\d+)\.(\d+)\.(\d+)\.(\d+)/;
+        $ipaddr = ($a<<24)|($b<<16)|($c<<8)|$d;
+        $ip_host{$host} = $ipaddr;
+        $weight{$host} = $weight;
+        $oweight{$host} = $weight;
+        $server_factor{$host} = $server_factor;
+        foreach $entry (split(/\s+/,$groups)) {
+            ($group,$play) = split(/\(/,$entry);
+            chop($play);
+            $$host{$group} = $play ? $play : 1;
+            $lb_groups{$group} = [] unless defined $lb_groups{$group};
+            $bg = $lb_groups{$group};
+            write_log("$host participation in $group is $$host{$group}") if $debug;
+            push(@$bg,$host);
+        }
+    }
+    write_log($message) if $debug;
+    close(CONFIG);
+    # assure ttl and random for each group
+    foreach $key (keys(%lb_groups)) {
+        $ttl{$key} = $default_ttl unless $ttl{$key};
+        $rnd{$key} = 0            unless $rnd{$key} >= 2;
+    }
+}
+
+
+############################################################
+#
+#  Statistics
+#
+
+sub log_stats {
+    my ($host, $group, $message);
+    $message = "statistics:\n\n";
+    $message .= sprintf("%10s %10s\n","Starting","Ending");
+    $message .= sprintf("%10s %10s %8s   %s\n","Weight","Weight","Hits","Host");
+    for $host (sort keys %weight) {
+        $message .= sprintf("%10d %10d %8d   %s\n",
+                            $oweight{$host},$weight{$host},$hits{$host},$host);
+    }
+    $message .= sprintf("\n%21s %8s   %s\n","Total Hits","Hits","Group");
+    for $group (sort keys %total_group_hits) {
+        $message .= sprintf("%21d %8d   %s\n",
+                            $total_group_hits{$group},$group_hits{$group},$group);
+    }
+    write_log($message);
+}
+
+
+############################################################
+#
+#  Standard Hooks
+#
+
+sub init_signals {
+    $::SIG{'HUP'}  = 'catch_hup';
+    $::SIG{'CHLD'} = 'restart_poller';
+    $::SIG{'USR1'} = 'toggle_debug';
+    $::SIG{'USR2'} = 'toggle_stats';
+}
+
+sub catch_hup { $need_reload=1 }
+
+sub toggle_debug {
+    $debug = ! $debug;
+    if ($debug) { write_log("debugging on");  }
+    else        { write_log("debugging off"); }
+}
+
+sub toggle_stats {
+    $log_stats = ! $log_stats;
+    if ($log_stats) {
+        %total_group_hits=();
+        write_log("statistics logging on - group totals reset");
+    } else {
+        write_log("statistics logging off");
+    }
+}
+
+sub clean_exit {
+    write_log("received signal, exiting...") ;
+    kill_poller();
+    close_log();
+    exit(0);
+}
+
+
+############################################################
+#
+#  Log and PID functions
+#
+
+sub open_log {
+    my $file = shift;
+    close_log() if $log_logging;
+    if ($file) {
+        open(LOGFILE,">>$file") or die "can't open $file: $!";
+    } else {
+        *LOGFILE = *STDOUT;
+    }
+    $log_logging = 1;
+    select(LOGFILE); $| =1;
+}
+
+sub close_log {
+    close(LOGFILE) if $log_logging;
+    $log_logging=0;
+}
+
+sub write_log {
+    my $message = shift;
+    my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+    my $date = sprintf("%02d/%02d %02d:%02d",$mon+1,$mday,$hour,$min);
+    print LOGFILE "$date $$ lbnamed $message\n" if $log_logging;
+}
+
+sub write_pid {
+    my ($file,$pid) = @_;
+    if (open(PID,">$file")) {
+        print PID "$pid\n";
+        close(PID);
+    } else {
+        write_log("Can't open PID file: $file.pid: $!");
+    }
+}
+
+=head1 NAME
+
+lbnamed - Load-balancing DNS server
+
+=head1 SYNOPSIS
+
+B<lbnamed> [B<-dns>] [B<-h> I<hostname>] [B<-l> I<logfile>] [B<-p>
+I<prefix>]
+
+=head1 DESCRIPTION
+
+B<lbnamed> is a load-balancing DNS server.  It spawns a separate program,
+B<poller>, to collect data about the load and state of servers.  Then, based
+on that data, it responds to DNS queries with the least loaded system in a
+pool of systems answering to the name in the query.  Each time it hands out
+a particular system, it increments that system's load so that the load will
+be balanced between multiple systems even between updates of the system
+loads.
+
+Configuration options are specified at the beginning of the script.  In the
+default configuration, it serves out the best.stanford.edu and
+best-a.stanford.edu domains with nameservers lbdns1.stanford.edu and
+lbdns2.stanford.edu.  The best domain returns CNAMEs to the real system
+names, whereas the best-a domain returns A records pointing to the IP
+address of the least loaded system.  The TTL of these records can be
+configured in the B<lbnamed> configuration file, as can the record returned
+for an MX query.
+
+A TXT query for a load-balanced pool will return a textual record listing
+all of the participating servers and their current loads and participation
+factors.  The server load is divided by the participation factor for the
+purposes of sorting by load.  B<lbnamed> can also be configured to return a
+randomly chosen host from the N least loaded rather than always returning
+the least loaded system.
+
+If B<lbnamed> receives a USR1 signal, it will toggle debugging (specified
+otherwise by the B<-d> option).  If it receives a USR2 signal, it will
+toggle statistics (specified otherwise by the B<-s> option).
+
+The default location of the B<lbnamed> configuration file is
+F</etc/lbnamed.config>.
+
+=head1 OPTIONS
+
+=over 4
+
+=item B<-d>
+
+Enable debugging, which causes B<lbnamed> to print out more information to
+its log file or standard output.
+
+=item B<-h> I<hostname>
+
+Listen on the IP address associated with I<hostname>.  If this option is not
+given, B<lbnamed> will listen on the interface corresponding to the system
+default hostname.
+
+=item B<-l> I<logfile>
+
+Log to I<logfile> rather than to standard output.  The log file will be
+closed and reopened whenever B<lbnamed> receives a HUP signal.
+
+=item B<-n>
+
+Don't become a daemon.  Normally, B<lbnamed> backgrounds itself when started
+to run as a daemon.  With this flag, B<lbnamed> continues running in the
+foreground (useful if the process is being managed by a tool like
+daemontools or init).
+
+=item B<-p> I<prefix>
+
+Normally, B<lbnamed> expects the results from the poller to be written to
+files starting with the name of the configuration file
+(F</etc/lbnamed.config> by default) followed by a period.  This option
+overrides that prefix and allows the results to be written into a different
+directory (F</var/lib/lbnamed/>, for example).  The names of the poller
+result files will be simply appended to I<prefix>, so if I<prefix>
+designates a directory, be sure to add the trailing slash.
+
+=item B<-s>
+
+Periodically log statistics about the queries seen and the underlying hosts
+handed out.  These statistics will be logged to the log file if B<-l> is
+given, or to standard output otherwise.
+
+=back
+
+=head1 CONFIGURATION FILE
+
+The default location of the configuration file is F</etc/lbnamed.config>.
+It contains two sections, one that lists systems and the load-balanced pools
+that they participate in, and a second that lists configuration for each
+pool (the TTL, whether to return a random host from the lowest N loaded, and
+the MX record to return if any).  Blank lines and lines beginning with a
+hash mark (C<#>) are ignored.
+
+The format of the first line is as follows:
+
+    hostname  server_factor  pool1 pool2(participation) pool3 ...
+
+The hostname should be the fully-qualified hostname of the system
+participating in one or more load-balanced pools.
+
+The I<server factor> specifies how much relative attention B<lbnamed> should
+pay to the reported system load versus the number of users.  Normally, each
+user counts as 10 points of load and each system load point counts as 3
+points of load, but those are multiplied by (10 - I<server_factor>) and
+I<server_factor> respectively.  If the load balancing should be entirely
+based on system load (such as for servers), use a I<server factor> of 10.
+
+Finally, all load-balance pools should be listed, separated by spaces.  The
+pools should be unqualified system names and will be served out of both the
+best.stanford.edu and best-a.stanford.edu domains.  All of the pools a given
+host participates in must be listed on the line for that host.  A system can
+be configured to usually not participate in a given pool by adding a numeric
+I<participation factor> in parentheses after a pool name (without a space
+between).  The load is divided by this number to obtain the final load for
+sorting purposes.  So, for example:
+
+    transfer1.stanford.edu  10  transfer
+    transfer2.stanford.edu  10  transfer(.1)
+
+would put two hosts, transfer1 and transfer2, into the transfer load-balance
+pool, basing the load entirely on system load.  transfer2's load would be
+divided by .1 (multiplied by 10) before sorting, so normally only transfer1
+would be handed out unless it were down or heavily loaded.
+
+The second section, which must come after all of the first section, has
+lines in the following format:
+
+    pool  ttl  top-n  mx-record
+
+This section may be omitted if the default TTL of 0 is acceptable, but be
+aware that some older DNS resolvers aren't very happy with a 0 TTL and a 0
+TTL may increase DNS traffic.
+
+If I<top-n> is specified as something other than 0 or 1, B<lbnamed> will
+return a random selection from the I<top-n> least loaded hosts rather than
+always returning the least loaded host.  If the I<mx-record> is specified,
+that host will be returned as the MX record for MX queries about this pool.
+
+In this section, if one is content with the defaults, trailing options may
+be omitted.  In other words, if you only want to specify the TTL, you can
+just specify the pool name and the TTL and omit the other options.
+
+=head1 FILES
+
+=over 4
+
+=item F</etc/lbnamed.config>
+
+The default location for the configuration file as described above.
+
+=item F</usr/sbin/poller>
+
+The poller program, spawned (and respawned as needed) automatically by
+B<lbnamed>.  This program does the work of querying remote systems and
+writing out the results for B<lbnamed> to read.  For more information, see
+the poller(8) man page.
+
+=item F</var/run/lbnamed.pid>
+
+=item F</var/run/poller.pid>
+
+The PIDs of the running B<lbnamed> and B<poller> processes are stored by
+B<lbnamed> in these files.
+
+=back
+
+=head1 SEE ALSO
+
+lbcd(8), poller(8)
+
+See L<http://www.stanford.edu/~riepel/lbnamed/> for more information on the
+B<lbnamed> system, including the original LISA paper.
+
+=head1 AUTHORS
+
+Rob Riepel, based on earlier work by Roland Schemers.  Documentation written
+by Russ Allbery.
+
+=cut

@@ -1,0 +1,41 @@
+#!/usr/bin/perl
+
+# slbcd - static/simple load-balanced client daemon
+
+#   slbcd is a simple load-balanced client daemon that will produce
+#   round-robin load balancing.  slbcd returns a version 2 LBCD reply
+#   with reasonable (mostly hard-coded) values.
+
+use IO::Socket;
+use Sys::Hostname;
+                            # Anatomy of a LBCD version 2 packet
+$version  = 2;              # protocol version
+$id       = 0;              # requester's unique request id
+$op       = 1;              # operation requested (request/reply=1)
+$status   = 1;              # status (okay=1)
+$btime    = time() - 3600;  # boot time
+$ctime    = time();         # current time
+$utime    = time();         # time user information last changed
+$l1       = 100;            # load * 100 last minute
+$l5       = 100;            # load * 100 last five minutes
+$l15      = 100;            # load * 100 last fifteen minutes
+$tot      = 0;              # total number of users logged in
+$uniq     = 0;              # total number of unique users
+$console  = 0;              # true if someone on console
+$reserved = 0;              # future use, padding ...
+
+$s = new IO::Socket::INET LocalAddr => hostname(),
+                          LocalPort => 4330,
+                          Proto => udp
+  or die "socket: $@\n";
+
+while ($s->recv($msg,1024)) {
+    ($id,$op) = (unpack("nnnn",$msg))[1,2];    # grab id and operation
+    next unless $op == 1;                      # skip it if it's not a request
+    $reply = pack("nnnnNNNnnnnnCC",            # build the reply
+                  $version, $id, $op, $status,
+                  $btime, time(), $utime,
+                  $l1, $l5, $l15, $tot, $uniq,
+                  $console, $reserved);
+    $s->send($reply);
+}

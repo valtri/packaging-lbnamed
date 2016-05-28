@@ -1,0 +1,229 @@
+
+  Contents
+  ========
+
+  Introduction
+  Collecting and Summarizing Host Metrics
+  Answering DNS Queries
+  TTLs and MXes
+  Configuring lbnamed
+  The Load-Balanced Client Daemon
+  Duh
+  Conclusion
+
+
+  Introduction
+  ============
+
+  lbnamed is a load balancing name server written in Perl using the Stanford::
+  DNSserver perl module.  lbnamed allows you to create dynamic groups of hosts
+  that have one name in the DNS.  A host may be in multiple groups at the same
+  time. For example, the name
+
+    www.best.stanford.edu
+
+  represents a dynamic group of 5 web servers named:
+
+     www{1,2,3,4,5}.stanford.edu
+
+  When someone tries to connect to www.best.stanford.edu, a DNS query is
+  performed.  That query eventually gets sent to the lbnamed server which
+  responds with the name of the least loaded of those 5 web servers.
+
+  Of course advertising a web service in a subdomain like "best.stanford.edu"
+  is less than desirable.  Fortunately, that can be avoided with the simple
+  alias:
+
+    www.stanford.edu -> www.best.stanford.edu
+
+  Now when someone tries to connect to www.stanford.edu and their DNS resolver
+  queries for the IP address of www.stanford.edu it gets the following answer:
+
+    www.stanford.edu       is an alias for  www.best.stanford.edu  (1)
+    www.best.stanford.edu  is an alias for  www3.stanford.edu      (2)
+    www3.stanford.edu      has address      171.64.10.89           (3)
+
+  In this "alias chain" type answer, the middle link, (2), is provided by
+  lbnamed; the others are provided by the normal name service serving the
+  "stanford.edu" zone.
+
+  lbnamed can return the address of the least loaded group member instead of
+  its name.  In that case, the query for the IP address of www.stanford.edu
+  would get the following answer:
+
+    www.stanford.edu       is an alias for  www.best.stanford.edu  (1)
+    www.best.stanford.edu  has address      171.64.10.89           (2)
+
+  This is somewhat less "honest", DNS-wise, because a reverse lookup on the
+  IP address yields the name www3.stanford.edu, not www.best.stanford.edu.
+  It does however avoid the "alias chain", which some older BIND versions
+  have trouble with (note that all those old BIND versions have security
+  problems, so no one should be running them now!).
+
+
+  Collecting and Summarizing Host Metrics
+  =======================================
+
+  The poller script queries the load-balanced client daemon, lbcd, on hosts
+  participating in load-balanced name groups.  It collects the system load
+  and other data from the lbcd running on each host (more on lbcd later).
+  The poller uses the collected information to calculate an overall "weight"
+  for each host.  The host names and weights are written to a file that the
+  lbnamed name server uses to determine which host names to pass out in
+  response to queries.
+
+  The poller calculates the weights using the following algorithm:
+
+    // constants
+
+    WEIGHT_PER_USER = 10
+    WEIGHT_PER_LOAD_UNIT = 3
+
+    // data retrieved from lbcd by the poller
+
+    l1   = current host load
+    tot  = total number of users logged into the host
+    uniq = number of unique users logged into the host
+
+    // data provided in the lbnamed configuration file
+
+    sf = this host's "server factor" in the range 0 to 10
+
+    weight = WEIGHT_PER_USER      * (0.2 * tot + 0.8 * uniq) * (10 - sf)
+           + WEIGHT_PER_LOAD_UNIT *          l1              *     sf
+
+  As you can see, the "server factor" controls the relative importance of
+  interactive user sessions.  A value of zero represents a purely interactive,
+  user-oriented host; a value of 10 represents a server with no logins.
+
+
+  Answering DNS Queries
+  =====================
+
+  The lbnamed script uses the weights calculated by the poller and the host
+  "participation factors" to determine which host's name to pass out in
+  response to a DNS query.  The participation factor is a configuration
+  parameter that allows for unequal load sharing between hosts in a group.
+
+  lbnamed sorts a group of hosts by (weight / participation factor) and passes
+  out the name of the host with the lowest value.  A host with a participation
+  factor of 0.10 would have to have a weight ten times that of a host with a
+  participation factor of 1.0 before they would sort equally.  A very small
+  participation factor, say 0.001, can be used to make one host a backup for a
+  set of other hosts with the default participation factor of 1.0.
+
+  Once lbnamed has determined which host's name to use in the DNS response,
+  it sends the response and increments the host's weight.  The increment is
+  calculated using the following formula:
+
+    // constants
+
+    WEIGHT_PER_USER = 10
+    WEIGHT_PER_LOAD_UNIT = 3
+
+    // data provided in the lbnamed configuration file
+
+    sf = this host's "server factor" in the range 0 to 10
+
+    increment = WEIGHT_PER_USER      * (10 - sf)
+              + WEIGHT_PER_LOAD_UNIT *    sf
+
+  Note that eventually all the hosts in a group will have the same weight and
+  their names will be passed out in round-robin fashion from then on.
+
+
+  TTLs and MXes
+  =============
+
+  By default, lbnamed uses TTL of 0 in its DNS responses.  That tells the DNS
+  not to cache the response and to always make a new query for the name in
+  question.  This gives the most accurate load sharing across the hosts in a
+  group.  But it may generate too many DNS queries.  If that's the case, you
+  can provide a non-zero TTL value for the group in the configuration file.
+  It's still best to keep the value small to promote a truly balanced load.
+
+  DNS queries for MX records must be handled in lbnamed for groups not using
+  the alias chain response type.  For those using the alias chain, the MX
+  response is "inherited" from the host's real name.  For example, an MX
+  query on www.stanford.edu might get the following alias chain answer:
+
+    www.stanford.edu       is an alias for     www.best.stanford.edu   (1)
+    www.best.stanford.edu  is an alias for     www3.stanford.edu       (2)
+    www3.stanford.edu      mail is handled by  10 leland.stanford.edu  (3)
+
+  As mentioned before, only link (2) comes from lbnamed, so it doesn't have to
+  handle the MX data.  But without the alias chain, the answer would be:
+
+    www.stanford.edu       is an alias for     www.best.stanford.edu   (1)
+    www.best.stanford.edu  mail is handled by  10 leland.stanford.edu  (2)
+
+  Once again part (2) is provided by the load-balanced name server, but this
+  time it's the MX record, so lbnamed must have the data to respond properly.
+  In order to support this, the lbnamed configuration file includes a section
+  where you may provide MX information.
+
+
+  Configuring lbnamed
+  ===================
+
+  lbnamed is configured using a configuration file.  The first section of the
+  file lists the names of the hosts and the names of the groups in which they
+  participate (remember that a group is a load-balanced name).  Each host also
+  has a server factor and a participation factor for each group it's in.  The
+  file may have an optional second section for listing load-balanced name TTLs
+  and MXes.  Here's a short sample configuration file:
+
+    # SF = server factor;     default participation factor = 1.0;
+
+    host                  SF  group(participation factor)
+    ####################  ##  #########################################
+    foo.stanford.edu       2  quux
+    bar.stanford.edu      10  www
+    baz.stanford.edu       5  quux www(.01)
+
+    # default TTL = 0 seconds;       top slice - see lbnamed POD;
+    # default MX  = none;
+
+    group           TTL  top slice   MX
+    ############  #####  #########   ##################
+    www               6          0   mail.stanford.edu
+
+
+  The Load-Balanced Client Daemon
+  ===============================
+
+  The load-balanced client daemon, lbcd, runs on the hosts participating in
+  load-balanced name groups.  The poller queries lbcd to get the host load
+  and other information.  lbcd is a mildly complex beast because it has to
+  understand how to get all that information from a plethora of Unix
+  variants.  Because of that complexity, lbcd is distributed and maintained
+  separately from lbnamed.
+
+  If lbcd doesn't support your flavor of Unix, or round-robin satisfies your
+  load-balancing needs, or you just want to play with lbnamed without down-
+  loading lbcd, this package does include slbcd, a static/simple load-balanced
+  client daemon.  slbcd is written in perl.  It provides a complete lbcd with
+  hard-coded values for the load and other data.  When you run it on the hosts
+  participating in a load-balanced name group, they will always have the same
+  weight and therefore their names will always be passed out in round-robin
+  fashion.
+
+
+  Duh
+  ===
+
+  The lbnamed and lbnamed.config files in this package contain Stanford-
+  specific configuration data.  Unless you're going to run a load-balanced
+  name service for Stanford, you'll want to edit those files replacing that
+  data with values appropriate for your DNS domain.
+
+
+  Conclusion
+  ==========
+
+  Hopefully this has been enough of an introduction to lbnamed that you can
+  make it work for you.  Be sure to check out the POD documentation for both
+  lbnamed and the poller, and the sample configuration file, lbnamed.config.
+
+  Share and enjoy.
+
