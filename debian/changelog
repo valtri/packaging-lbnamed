@@ -1,3 +1,9 @@
+lbnamed (2.3.2-1+fd1) unstable; urgency=low
+
+  * Moar packaging (startup script, ...).
+
+ -- František Dvořák <valtri@forkys2>  Sat, 28 May 2016 09:53:41 +0200
+
 lbnamed (2.3.2-1) unstable; urgency=low
 
   * Initial packaging, based loosely on the stanford-lbnamed packaging but
