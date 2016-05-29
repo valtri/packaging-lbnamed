@@ -1,0 +1,15 @@
+Add IPv6 support. Requires also patched Stanford:DNSserver.
+
+Index: packaging-lbnamed/lbnamed
+===================================================================
+--- packaging-lbnamed.orig/lbnamed
++++ packaging-lbnamed/lbnamed
+@@ -36,7 +36,7 @@ $soa                  = rr_SOA(hostname(
+ #  Command-line arguement processing
+ #
+ 
+-($myname = $0) =~ s|.*/||;  $hostname = hostname();
++($myname = $0) =~ s|.*/||;  $hostname = '::';
+ 
+ getopts("dh:l:np:s") or die <<EOF;
+ 
