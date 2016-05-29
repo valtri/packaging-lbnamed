@@ -12,6 +12,7 @@ Homepage: http://www.stanford.edu/~riepel/lbnamed/
 Package: lbnamed
 Architecture: all
 Depends: ${perl:Depends}, ${misc:Depends}, libstanford-dnsserver-perl
+Pre-Depends: adduser
 Description: load-balancing DNS name server
  lbnamed queries remote hosts running an lbcd responder and uses the
  returned weight information plus a configurable weighing algorithm to
