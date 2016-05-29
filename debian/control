@@ -8,6 +8,8 @@ Maintainer: František Dvořák <valtri@civ.zcu.cz>
 Bugs: mailto:valtri@civ.zcu.cz
 Standards-Version: 3.9.8
 Homepage: http://www.stanford.edu/~riepel/lbnamed/
+Vcs-Git: https://github.com/valtri/packaging-lbnamed
+Vcs-Browser: https://github.com/valtri/packaging-lbnamed
 
 Package: lbnamed
 Architecture: all
