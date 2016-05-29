@@ -3,8 +3,8 @@ set -e
 
 getent group lbnamed >/dev/null || addgroup --system lbnamed
 getent passwd lbnamed >/dev/null || adduser --system --group --home /var/lib/lbnamed lbnamed
-mkdir -p /var/lib/lbnamed /var/run/lbnamed 2>/dev/null || :
+mkdir -p /var/lib/lbnamed 2>/dev/null || :
 touch /var/log/lbnamed.log
-chown -R lbnamed:lbnamed /var/lib/lbnamed /var/run/lbnamed /var/log/lbnamed.log
+chown -R lbnamed:lbnamed /var/lib/lbnamed /var/log/lbnamed.log
 
 #DEBHELPER#

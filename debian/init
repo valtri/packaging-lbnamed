@@ -13,7 +13,7 @@ PATH=/sbin:/usr/sbin:/bin:/usr/bin
 DESC=lbnamed
 NAME=lbnamed
 DAEMON=/etc/$NAME
-PIDFILE=/var/run/$NAME.pid
+PIDFILE=/var/run/$NAME/$NAME.pid
 SCRIPTNAME=/etc/init.d/$NAME
 RUN=no
 
@@ -29,6 +29,8 @@ fi
 
 do_start()
 {
+  mkdir -p /var/run/lbnamed 2>/dev/null || :
+  chown -R lbnamed:lbnamed /var/run/lbnamed
   start-stop-daemon --start --quiet --pidfile $PIDFILE --chdir /var/lib/lbnamed --exec $DAEMON -- $ARGS || return 2
 }
 
