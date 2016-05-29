@@ -36,8 +36,10 @@ do_start()
 
 do_stop()
 {
-  # using SIGKILL to avoid coredumps (there is probably some problem during stop)
-  start-stop-daemon --stop --quiet --signal=KILL --pidfile $PIDFILE
+  # 1) using SIGKILL to avoid coredumps (there is probably some problem during stop)
+  # 2) not providing process name (some problem with the unprivileged user)
+  # 3) explicit removal of the pidfile (it isn't removed automatically)
+  start-stop-daemon --stop --quiet --signal=KILL --pidfile $PIDFILE && rm -f $PIDFILE
 }
 
 case "$1" in
