@@ -1,0 +1,27 @@
+Run lbnamed under non-privileged user.
+
+Index: packaging-lbnamed/lbnamed
+===================================================================
+--- packaging-lbnamed.orig/lbnamed
++++ packaging-lbnamed/lbnamed
+@@ -24,8 +24,8 @@ $poller               = "/usr/sbin/polle
+ $poller_sleep         = 120;
+ $poller_config        = "/etc/lbnamed.config";
+ $poller_results       = $poller_config . '.';
+-$poller_pidfile       = "/var/run/poller.pid";
+-$pidfile              = "/var/run/lbnamed.pid";
++$poller_pidfile       = "/var/run/lbnamed/poller.pid";
++$pidfile              = "/var/run/lbnamed/lbnamed.pid";
+ $hostmaster           = "action.stanford.edu";
+ @servers              = qw(lbdns1.stanford.edu lbdns2.stanford.edu);
+ $soa                  = rr_SOA(hostname(), $hostmaster, time(), 3600, 1800, 86400, 0);
+@@ -80,7 +80,8 @@ $ns = new Stanford::DNSserver (
+                                logfunc   =>   \&write_log,
+                                loopfunc  =>   \&do_reload,
+                                exitfunc  =>  \&clean_exit,
+-                               dontwait  =>             1
++                               dontwait  =>             1,
++                               run_as    => 'lbnamed'
+                               );
+ 
+ 
